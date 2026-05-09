@@ -1,6 +1,7 @@
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from src.zoho.audit import AuditLogger
@@ -141,3 +142,90 @@ def test_refresh_token_sets_expires_at(
     # Should be ~3600s in the future (allow ±5s of test timing slop)
     assert client._token_expires_at >= before + 3595
     assert client._token_expires_at <= before + 3605
+
+
+def test_get_returns_response_and_audits(
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+    tmp_path: Path,
+) -> None:
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "test-token", "expires_in": 3600},
+    )
+    httpx_mock.add_response(
+        url="https://www.zohoapis.com/crm/v6/Contacts/search?criteria=%28Tier%3Aequals%3Apremium%29",
+        method="GET",
+        json={"data": [{"id": "1", "Last_Name": "Alice"}]},
+    )
+
+    client = ZohoClient(config, audit=audit, cache=cache)
+    result = client.get("Contacts/search", params={"criteria": "(Tier:equals:premium)"})
+
+    assert result == {"data": [{"id": "1", "Last_Name": "Alice"}]}
+    audit_files = list(tmp_path.glob("zoho-audit-*.jsonl"))
+    assert len(audit_files) == 1
+    assert "Contacts/search" in audit_files[0].read_text()
+
+
+def test_get_uses_cache_on_second_call(
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "test-token", "expires_in": 3600},
+    )
+    httpx_mock.add_response(
+        url="https://www.zohoapis.com/crm/v6/settings/fields?module=Contacts",
+        method="GET",
+        json={"fields": [{"api_name": "City"}]},
+    )
+
+    client = ZohoClient(config, audit=audit, cache=cache)
+    client.get(
+        "settings/fields",
+        params={"module": "Contacts"},
+        cache_key="fields:Contacts",
+    )
+    client.get(
+        "settings/fields",
+        params={"module": "Contacts"},
+        cache_key="fields:Contacts",
+    )
+
+    # Token POST + 1 GET = 2 requests; cache hit means second GET didn't fire
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_get_logs_error_on_http_failure(
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+    tmp_path: Path,
+) -> None:
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "test-token", "expires_in": 3600},
+    )
+    httpx_mock.add_response(
+        url="https://www.zohoapis.com/crm/v6/Contacts/search",
+        method="GET",
+        status_code=500,
+    )
+
+    client = ZohoClient(config, audit=audit, cache=cache)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.get("Contacts/search")
+
+    audit_files = list(tmp_path.glob("zoho-audit-*.jsonl"))
+    assert len(audit_files) == 1
+    assert "error" in audit_files[0].read_text()

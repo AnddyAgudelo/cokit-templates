@@ -110,3 +110,45 @@ class ZohoClient:
             self._access_token = body["access_token"]
             expires_in = body.get("expires_in", 3600)
             self._token_expires_at = time.monotonic() + expires_in
+
+    def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        cache_key: str | None = None,
+        cache_ttl_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """
+        Read-only Zoho GET with caching, rate limiting, and audit logging.
+        `cache_key=None` disables caching for this call.
+        """
+        if cache_key:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        self._rate_limiter.acquire()
+        self._refresh_token_if_needed()
+
+        url = f"{self._config.api_domain}/crm/v6/{path.lstrip('/')}"
+        t0 = time.monotonic()
+        try:
+            resp = self._http.get(
+                url,
+                headers={"Authorization": f"Zoho-oauthtoken {self._access_token}"},
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            self._audit.log_error(path, params, e)
+            raise
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        self._audit.log_success(path, params, data, latency_ms=latency_ms)
+
+        if cache_key:
+            self._cache.set(cache_key, data, ttl_seconds=cache_ttl_seconds)
+
+        return data
