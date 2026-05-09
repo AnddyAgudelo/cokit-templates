@@ -123,7 +123,7 @@ class ZohoClient:
         Read-only Zoho GET with caching, rate limiting, and audit logging.
         `cache_key=None` disables caching for this call.
         """
-        if cache_key:
+        if cache_key is not None:
             cached = self._cache.get(cache_key)
             if cached is not None:
                 return cached
@@ -148,7 +148,7 @@ class ZohoClient:
         latency_ms = (time.monotonic() - t0) * 1000
         self._audit.log_success(path, params, data, latency_ms=latency_ms)
 
-        if cache_key:
+        if cache_key is not None:
             self._cache.set(cache_key, data, ttl_seconds=cache_ttl_seconds)
 
         return data
