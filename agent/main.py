@@ -3,7 +3,7 @@ import os
 
 from copilotkit import CopilotKitMiddleware
 from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.state import AgentState
 from src.system_prompt import SYSTEM_PROMPT
@@ -22,9 +22,8 @@ def _build_agent():
         cache=SessionCache(),
     )
 
-    model = ChatOpenAI(
-        model=os.environ.get("OPENAI_MODEL", "gpt-5.2-mini"),
-        model_kwargs={"parallel_tool_calls": False},
+    model = ChatGoogleGenerativeAI(
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
     )
 
     tools = [*make_zoho_tools(zoho_client), render_chart]
