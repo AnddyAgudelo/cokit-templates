@@ -237,29 +237,27 @@ def make_zoho_tools(client: ZohoClient) -> list:
             endpoint = module
             params = {"fields": select}
 
-        # Cap limit to 200 (Zoho's max per_page) and only paginate enough
-        # pages to satisfy `limit`. For a "how many" question (default
-        # limit=50), one page (200 records) is plenty — paginating further
-        # bloats the LLM context with unused records and trips overflow.
-        capped_limit = min(limit, 200)
-        needed_pages = max(1, (capped_limit + 199) // 200)
-
+        # Paginate fully so `count` reflects the real total (capped at
+        # max_pages=25 = 5000 records to bound API cost).
         try:
-            all_records, truncated = _paginated_get(
-                client, endpoint, params, max_pages=needed_pages
-            )
+            all_records, truncated = _paginated_get(client, endpoint, params)
         except Exception as e:
             return {"count": 0, "records": [], "error": str(e)}
 
-        # Try to recover the true total from Zoho's first-page info.count by
-        # making one cheap HEAD-style call: peek at page 1 with per_page=1.
-        # (Skipped for now — info.count would require restructuring _paginated_get.
-        # Use len(all_records) as a lower bound and let truncated flag signal more.)
-        result_records = all_records[:capped_limit]
+        # IMPORTANT: hard-bound records returned to the LLM at SAMPLE_CAP
+        # (10) regardless of user's `limit`. The LLM only needs the count
+        # + a small sample to answer "how many" questions. Returning all
+        # paginated records (up to 5000 Deal objects with their many fields)
+        # would blow gpt-4o-mini's 128k context window. Truncated flag tells
+        # the LLM how many more exist beyond the sample.
+        SAMPLE_CAP = 10
+        sample_size = min(limit, len(all_records), SAMPLE_CAP)
+        result_records = all_records[:sample_size]
         return {
             "count": len(all_records),
             "records": result_records,
-            "truncated": truncated or len(all_records) > capped_limit,
+            "sample_size": sample_size,
+            "truncated": truncated or len(all_records) > sample_size,
         }
 
     @tool
