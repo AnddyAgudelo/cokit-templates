@@ -23,8 +23,9 @@ def render_chart(
     """
     Render a chart of the given type (pie | bar | metric).
 
-    `data` must be a list of {label, value} pairs. Items with non-numeric
-    values or missing keys are silently skipped.
+    `data` must be a list of {label, value} OR {label, count} pairs (both
+    keys are accepted). Items with non-numeric values or missing keys are
+    silently skipped.
 
     Call AFTER getting real data from a query tool. NEVER invent data.
 
@@ -38,10 +39,14 @@ def render_chart(
 
     cleaned: list[dict[str, Any]] = []
     for d in data:
-        if not isinstance(d, dict) or "label" not in d or "value" not in d:
+        if not isinstance(d, dict) or "label" not in d:
+            continue
+        # Accept both "value" (canonical) and "count" (alias from get_field_distribution)
+        raw_value = d.get("value") if "value" in d else d.get("count")
+        if raw_value is None:
             continue
         try:
-            cleaned.append({"label": str(d["label"]), "value": float(d["value"])})
+            cleaned.append({"label": str(d["label"]), "value": float(raw_value)})
         except (TypeError, ValueError):
             continue
 
