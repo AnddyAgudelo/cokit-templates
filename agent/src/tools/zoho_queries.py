@@ -10,8 +10,22 @@ from src.zoho.client import ZohoClient
 DEFAULT_QUERY_FIELDS = ["id", "Last_Name", "First_Name", "Account_Name"]
 
 
+_COQL_RESERVED = (":", "(", ")")
+
+
 def _build_criteria(filters: dict[str, str]) -> str:
-    """Build a Zoho COQL-like criteria string: (k:equals:v)and(k2:equals:v2)."""
+    """Build a Zoho COQL-like criteria string: (k:equals:v)and(k2:equals:v2).
+
+    Raises ValueError if any value contains COQL-reserved chars; Zoho's
+    documented escape rules for `equals` are unreliable, so we refuse rather
+    than silently producing a malformed query.
+    """
+    for k, v in filters.items():
+        if any(ch in v for ch in _COQL_RESERVED):
+            raise ValueError(
+                f"filter value for {k!r} contains COQL-reserved char "
+                f"(one of {_COQL_RESERVED}): {v!r}"
+            )
     return "and".join(f"({k}:equals:{v})" for k, v in filters.items())
 
 
@@ -56,9 +70,11 @@ def make_zoho_tools(client: ZohoClient) -> list:
 
         records = response.get("data", []) or []
         info = response.get("info", {}) or {}
+        total = info.get("count", len(records))
         return {
-            "count": info.get("count", len(records)),
+            "count": total,
             "records": records[:capped_limit],
+            "truncated": len(records) >= capped_limit and total > capped_limit,
         }
 
     @tool
@@ -94,7 +110,12 @@ def make_zoho_tools(client: ZohoClient) -> list:
             {"label": label, "count": count}
             for label, count in sorted(counts.items(), key=lambda kv: -kv[1])
         ]
-        return {"field": field, "buckets": buckets, "total": len(records)}
+        return {
+            "field": field,
+            "buckets": buckets,
+            "total": len(records),
+            "truncated": len(records) >= 200,
+        }
 
     @tool
     def list_custom_fields(module: str = "Contacts") -> list[dict[str, Any]]:
