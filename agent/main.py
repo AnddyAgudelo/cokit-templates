@@ -1,5 +1,6 @@
 """Entry point for the LangGraph Segmentation Explorer agent."""
 import os
+from datetime import date
 
 from copilotkit import CopilotKitMiddleware
 from langchain.agents import create_agent
@@ -29,12 +30,15 @@ def _build_agent():
 
     tools = [*make_zoho_tools(zoho_client), render_chart]
 
+    today = date.today().isoformat()
+    system_prompt = SYSTEM_PROMPT.replace("{TODAY}", today)
+
     return create_agent(
         model=model,
         tools=tools,
         middleware=[CopilotKitMiddleware()],
         state_schema=AgentState,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
 

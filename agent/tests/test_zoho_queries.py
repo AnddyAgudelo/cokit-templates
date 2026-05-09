@@ -445,6 +445,39 @@ def test_query_customers_created_before_clause_in_criteria() -> None:
     assert "(Created_Time:less_equal:2026-05-01T00:00:00+00:00)" in criteria
 
 
+# ---------------------------------------------------------------------------
+# Bug fix 3: _paginated_get graceful error handling after first page
+# ---------------------------------------------------------------------------
+
+def test_paginated_get_graceful_error_after_first_page() -> None:
+    """If page 1 succeeds but page 2 raises, return page-1 records with truncated=True."""
+    from src.tools.zoho_queries import _paginated_get
+
+    client = MagicMock()
+    client.get.side_effect = [
+        {"data": [{"id": "1"}, {"id": "2"}], "info": {"more_records": True}},
+        RuntimeError("HTTP 400 — page limit exceeded"),
+    ]
+
+    records, truncated = _paginated_get(client, "Deals/search", {"criteria": "(Layout:equals:123)"})
+
+    assert records == [{"id": "1"}, {"id": "2"}]
+    assert truncated is True
+    assert client.get.call_count == 2
+
+
+def test_paginated_get_propagates_page1_error() -> None:
+    """If page 1 itself raises, the exception propagates (no records to salvage)."""
+    from src.tools.zoho_queries import _paginated_get
+
+    client = MagicMock()
+    client.get.side_effect = RuntimeError("zoho down")
+
+    import pytest
+    with pytest.raises(RuntimeError, match="zoho down"):
+        _paginated_get(client, "Deals/search", {"criteria": "(Layout:equals:123)"})
+
+
 def test_query_customers_no_filters_but_layout_is_valid() -> None:
     """query_customers succeeds with only layout= and no filters dict."""
     client = MagicMock()

@@ -80,15 +80,24 @@ def _paginated_get(
 ) -> tuple[list[dict], bool]:
     """Fetch all pages from a Zoho list/search endpoint. Returns (records, truncated).
 
-    Loops until info.more_records is false OR max_pages reached. Concatenates
-    `data` arrays. Each page is one client.get call (rate-limited + audited).
+    Stops when info.more_records is false, when max_pages is reached, OR when
+    Zoho returns an error on a page beyond the first (its /search endpoint has
+    a 2000-record cap that surfaces as HTTP 400 around page 11). In all
+    truncation cases, returns what we have with truncated=True.
     """
     all_records: list[dict] = []
     for page in range(1, max_pages + 1):
         page_params = dict(params)
         page_params["page"] = page
         page_params["per_page"] = 200
-        response = client.get(endpoint, params=page_params)
+        try:
+            response = client.get(endpoint, params=page_params)
+        except Exception:
+            # Page-N error — if we already have records from earlier pages,
+            # treat as truncation. If page 1 failed, propagate.
+            if all_records:
+                return all_records, True
+            raise
         records = response.get("data", []) or []
         all_records.extend(records)
         info = response.get("info", {}) or {}
