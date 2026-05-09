@@ -82,22 +82,31 @@ class ZohoClient:
         self._rate_limiter = rate_limiter or RateLimiter(per_minute=90)
         self._access_token: str | None = None
         self._token_expires_at: float = 0.0
+        self._token_lock = Lock()
 
     def _refresh_token_if_needed(self) -> None:
-        if self._access_token and time.monotonic() < self._token_expires_at - 30:
-            return
+        with self._token_lock:
+            if self._access_token and time.monotonic() < self._token_expires_at - 30:
+                return
 
-        resp = self._http.post(
-            f"{self._config.accounts_domain}/oauth/v2/token",
-            data={
-                "refresh_token": self._config.refresh_token,
-                "client_id": self._config.client_id,
-                "client_secret": self._config.client_secret,
-                "grant_type": "refresh_token",
-            },
-        )
-        resp.raise_for_status()
-        body = resp.json()
-        self._access_token = body["access_token"]
-        expires_in = body.get("expires_in", 3600)
-        self._token_expires_at = time.monotonic() + expires_in
+            resp = self._http.post(
+                f"{self._config.accounts_domain}/oauth/v2/token",
+                data={
+                    "refresh_token": self._config.refresh_token,
+                    "client_id": self._config.client_id,
+                    "client_secret": self._config.client_secret,
+                    "grant_type": "refresh_token",
+                },
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            if "access_token" not in body:
+                raise RuntimeError(
+                    f"OAuth token refresh failed: response missing 'access_token'. "
+                    f"Body: {body}"
+                )
+
+            self._access_token = body["access_token"]
+            expires_in = body.get("expires_in", 3600)
+            self._token_expires_at = time.monotonic() + expires_in
