@@ -1,0 +1,104 @@
+import time
+from pathlib import Path
+
+import pytest
+
+from src.zoho.audit import AuditLogger
+from src.zoho.cache import SessionCache
+from src.zoho.client import RateLimiter, ZohoClient, ZohoConfig
+
+
+@pytest.fixture
+def config() -> ZohoConfig:
+    return ZohoConfig(
+        client_id="test-id",
+        client_secret="test-secret",
+        refresh_token="test-refresh",
+        api_domain="https://www.zohoapis.com",
+        accounts_domain="https://accounts.zoho.com",
+    )
+
+
+@pytest.fixture
+def audit(tmp_path: Path) -> AuditLogger:
+    return AuditLogger(audit_dir=tmp_path)
+
+
+@pytest.fixture
+def cache() -> SessionCache:
+    return SessionCache()
+
+
+def test_zoho_config_from_env_missing_var_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ZOHO_CLIENT_ID", raising=False)
+    monkeypatch.delenv("ZOHO_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("ZOHO_REFRESH_TOKEN", raising=False)
+    monkeypatch.delenv("ZOHO_API_DOMAIN", raising=False)
+    monkeypatch.delenv("ZOHO_ACCOUNTS_DOMAIN", raising=False)
+    with pytest.raises(RuntimeError, match="Missing"):
+        ZohoConfig.from_env()
+
+
+def test_zoho_config_from_env_strips_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ZOHO_CLIENT_ID", "id")
+    monkeypatch.setenv("ZOHO_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("ZOHO_REFRESH_TOKEN", "refresh")
+    monkeypatch.setenv("ZOHO_API_DOMAIN", "https://www.zohoapis.com/")
+    monkeypatch.setenv("ZOHO_ACCOUNTS_DOMAIN", "https://accounts.zoho.com/")
+    cfg = ZohoConfig.from_env()
+    assert cfg.api_domain == "https://www.zohoapis.com"
+    assert cfg.accounts_domain == "https://accounts.zoho.com"
+
+
+def test_refresh_token_calls_oauth_endpoint(
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+) -> None:
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "new-token", "expires_in": 3600},
+    )
+    client = ZohoClient(config, audit=audit, cache=cache)
+    client._refresh_token_if_needed()
+    assert client._access_token == "new-token"
+
+
+def test_refresh_token_skipped_when_token_fresh(
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+) -> None:
+    client = ZohoClient(config, audit=audit, cache=cache)
+    client._access_token = "still-valid"
+    client._token_expires_at = time.monotonic() + 3600
+
+    client._refresh_token_if_needed()
+    assert len(httpx_mock.get_requests()) == 0
+    assert client._access_token == "still-valid"
+
+
+def test_rate_limiter_allows_under_capacity() -> None:
+    limiter = RateLimiter(per_minute=3)
+    limiter.acquire()
+    limiter.acquire()
+    limiter.acquire()
+
+
+def test_rate_limiter_resets_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_time = [1000.0]
+    monkeypatch.setattr("src.zoho.client.time.monotonic", lambda: fake_time[0])
+    monkeypatch.setattr("src.zoho.client.time.sleep", lambda _: None)
+
+    limiter = RateLimiter(per_minute=2)
+    limiter.acquire()
+    limiter.acquire()
+    fake_time[0] = 1061.0
+    limiter.acquire()
