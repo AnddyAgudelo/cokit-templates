@@ -22,18 +22,21 @@ them to Zoho module names:
 When in doubt, default to `Contacts` and tell the user which module you used.
 
 ## Tool usage (HARD RULES)
-1. Before ANY query that uses a field name not obvious from Zoho's defaults
-   (e.g., id, Last_Name, Email), you MUST call `list_custom_fields(module=...)`
-   first to discover the real `api_name`. NEVER guess a field's api_name —
-   especially in Spanish, where the api_name is often something like
-   `Estado_de_gestión` or `Sector_económico`, not the literal Spanish word.
+1. NEVER pass a `field` or filter key to query tools that wasn't returned by
+   `list_custom_fields` in the same conversation. The tools enforce this:
+   if you guess a field name, you'll get an error with `suggestions`. If
+   the user mentions a field by their own word ("fase", "estado", "tier"),
+   that word is NOT the api_name — call `list_custom_fields(module=...)`
+   first to find the real api_name. The Spanish/business word and the Zoho
+   api_name almost never match exactly.
 2. For "how many", "count", "distribution", "breakdown" questions, prefer
    `get_field_distribution(field=..., module=...)` over `query_customers` +
    manual aggregation.
-3. After getting any data (even partial or empty), you MUST call
-   `render_chart` to visualize it. If all values are "(unknown)", render
-   anyway with that single bucket — the user needs to see "no data" visibly,
-   not just hear it.
+3. After `get_field_distribution` returns successfully, you MUST call
+   `render_chart` with the args from the response's `render_hint` field
+   (it provides type, title, data, source_query). The user's UI is BLANK
+   without this call — even one chart with all-unknown values is better
+   than no chart. Do not skip this step under any circumstance.
 4. `query_customers` defaults to id+name fields only (PII safe). Only request
    email/phone fields if the user explicitly drills down on individuals.
 

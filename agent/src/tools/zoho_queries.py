@@ -29,6 +29,34 @@ def _build_criteria(filters: dict[str, str]) -> str:
     return "and".join(f"({k}:equals:{v})" for k, v in filters.items())
 
 
+def _fetch_field_api_names(client: ZohoClient, module: str) -> set[str]:
+    """Return the set of api_names defined in a Zoho module. Cached 1h."""
+    try:
+        response = client.get(
+            "settings/fields",
+            params={"module": module},
+            cache_key=f"fields:{module}",
+            cache_ttl_seconds=3600,
+        )
+    except Exception:
+        return set()
+    return {
+        f.get("api_name")
+        for f in (response.get("fields") or [])
+        if f.get("api_name")
+    }
+
+
+def _suggest_similar(field: str, valid: set[str], n: int = 5) -> list[str]:
+    """Find up to n field names similar to `field` (case-insensitive substring match)."""
+    field_lower = field.lower()
+    matches = [v for v in valid if field_lower in v.lower() or v.lower() in field_lower]
+    if matches:
+        return sorted(matches)[:n]
+    # Fallback: just return some valid fields so the LLM has a hint
+    return sorted(valid)[:n]
+
+
 def make_zoho_tools(client: ZohoClient) -> list:
     """Bind tools to a ZohoClient instance via closure."""
 
@@ -43,6 +71,8 @@ def make_zoho_tools(client: ZohoClient) -> list:
         Query Zoho records matching `filters` in the specified `module`.
         `filters` example: {"Tier": "premium", "City": "Bogota"}.
         Returns aggregate count and a list of records.
+        Validates filter keys against the module schema; returns suggestions
+        if any key is unknown.
         Default `fields` exclude PII (email, phone, address) — pass explicit
         `fields` ONLY when the user explicitly drills down on individual contacts.
         `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
@@ -54,6 +84,22 @@ def make_zoho_tools(client: ZohoClient) -> list:
                 "records": [],
                 "error": "filters is required (e.g., {'Tier': 'premium'})",
             }
+
+        # Validate filter keys exist in module schema
+        valid_fields = _fetch_field_api_names(client, module)
+        if valid_fields:
+            invalid_keys = [k for k in filters if k not in valid_fields]
+            if invalid_keys:
+                suggestions = {k: _suggest_similar(k, valid_fields) for k in invalid_keys}
+                return {
+                    "count": 0,
+                    "records": [],
+                    "error": (
+                        f"Filter keys not in module {module!r}: {invalid_keys}. "
+                        f"Suggestions: {suggestions}"
+                    ),
+                    "suggestions": suggestions,
+                }
 
         capped_limit = min(limit, 200)
         criteria = _build_criteria(filters)
@@ -88,13 +134,44 @@ def make_zoho_tools(client: ZohoClient) -> list:
     ) -> dict[str, Any]:
         """
         Aggregate distribution of `field` over the (filtered) records in `module`.
-        Returns: {"field": str, "buckets": [{"label": str, "count": int}, ...], "total": int}.
-        Prefer this over query_customers + manual aggregation.
+        Returns: {"field": str, "buckets": [...], "total": int}.
+        Validates `field` exists in the module schema; if not, returns an error
+        with suggested field names. Prefer this over query_customers + manual aggregation.
         `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
         "Deals", "Leads". Use "Accounts" for companies/empresas.
         """
+        # Deterministic validation — prevents LLM field hallucinations
+        valid_fields = _fetch_field_api_names(client, module)
+        if valid_fields and field not in valid_fields:
+            suggestions = _suggest_similar(field, valid_fields)
+            return {
+                "field": field,
+                "buckets": [],
+                "total": 0,
+                "error": (
+                    f"Field {field!r} does not exist in module {module!r}. "
+                    f"Did you mean one of: {suggestions}? "
+                    f"Call list_custom_fields(module={module!r}) for the full list."
+                ),
+                "suggestions": suggestions,
+            }
+
         params: dict[str, Any] = {"fields": f"id,{field}", "per_page": 200}
         if filters:
+            # Also validate filter keys
+            invalid_keys = [k for k in filters if k not in valid_fields and valid_fields]
+            if invalid_keys:
+                suggestions = {k: _suggest_similar(k, valid_fields) for k in invalid_keys}
+                return {
+                    "field": field,
+                    "buckets": [],
+                    "total": 0,
+                    "error": (
+                        f"Filter keys not in module {module!r}: {invalid_keys}. "
+                        f"Suggestions: {suggestions}"
+                    ),
+                    "suggestions": suggestions,
+                }
             params["criteria"] = _build_criteria(filters)
             endpoint = f"{module}/search"
         else:
@@ -121,6 +198,15 @@ def make_zoho_tools(client: ZohoClient) -> list:
             "buckets": buckets,
             "total": len(records),
             "truncated": len(records) >= 200,
+            "render_hint": {
+                "type": "bar" if len(buckets) > 1 else "metric",
+                "title": f"{field} distribution in {module}",
+                "data": buckets,
+                "source_query": (
+                    f"{field} grouped over {module}"
+                    + (f" filtered by {filters}" if filters else "")
+                ),
+            },
         }
 
     @tool

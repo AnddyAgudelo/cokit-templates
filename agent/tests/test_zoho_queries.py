@@ -213,3 +213,80 @@ def test_get_field_distribution_uses_module_with_filters() -> None:
 
     call_args = client.get.call_args
     assert call_args.args[0] == "Accounts/search", f"expected Accounts/search, got {call_args.args[0]}"
+
+
+# ---------------------------------------------------------------------------
+# Field validation: deterministic enforcement against LLM hallucinations
+# ---------------------------------------------------------------------------
+
+def test_get_field_distribution_validates_field_exists() -> None:
+    """If the field doesn't exist in the module, return error with suggestions."""
+    from unittest.mock import MagicMock
+    client = MagicMock()
+    # First call: settings/fields returns the schema
+    # Second call would be the actual distribution — but should never happen because validation fails
+    client.get.return_value = {
+        "fields": [
+            {"api_name": "Estado_de_gestion"},
+            {"api_name": "Sector_economico"},
+            {"api_name": "Industry"},
+        ],
+    }
+    [_, get_field_distribution, _] = make_zoho_tools(client)
+
+    result = get_field_distribution.invoke({
+        "field": "Fase",
+        "module": "Accounts",
+    })
+
+    assert result["buckets"] == []
+    assert "error" in result
+    assert "Fase" in result["error"]
+    assert "Accounts" in result["error"]
+    assert "suggestions" in result
+    # Settings/fields was called exactly once (the validation), not twice
+    assert client.get.call_count == 1
+
+
+def test_get_field_distribution_returns_render_hint_on_success() -> None:
+    """Successful distributions include a render_hint to guide the LLM."""
+    from unittest.mock import MagicMock
+    client = MagicMock()
+
+    def fake_get(path, params=None, **kwargs):
+        if path == "settings/fields":
+            return {"fields": [{"api_name": "City"}, {"api_name": "Industry"}]}
+        # Distribution call
+        return {"data": [{"City": "Bogota"}, {"City": "Medellin"}, {"City": "Bogota"}]}
+
+    client.get.side_effect = fake_get
+    [_, get_field_distribution, _] = make_zoho_tools(client)
+
+    result = get_field_distribution.invoke({"field": "City"})
+
+    assert "buckets" in result
+    assert "render_hint" in result
+    assert result["render_hint"]["type"] == "bar"
+    assert result["render_hint"]["data"] == result["buckets"]
+    assert "title" in result["render_hint"]
+
+
+def test_query_customers_validates_filter_keys() -> None:
+    """If a filter key doesn't exist in the module, return error with suggestions."""
+    from unittest.mock import MagicMock
+    client = MagicMock()
+    client.get.return_value = {
+        "fields": [{"api_name": "Tier"}, {"api_name": "City"}],
+    }
+    [query_customers, _, _] = make_zoho_tools(client)
+
+    result = query_customers.invoke({
+        "filters": {"NonExistent": "value"},
+        "limit": 50,
+    })
+
+    assert result["count"] == 0
+    assert result["records"] == []
+    assert "error" in result
+    assert "NonExistent" in result["error"]
+    assert "suggestions" in result
