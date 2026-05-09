@@ -229,3 +229,59 @@ def test_get_logs_error_on_http_failure(
     audit_files = list(tmp_path.glob("zoho-audit-*.jsonl"))
     assert len(audit_files) == 1
     assert "error" in audit_files[0].read_text()
+
+
+def test_get_retries_once_on_429(
+    monkeypatch: pytest.MonkeyPatch,
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+) -> None:
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "t", "expires_in": 3600},
+    )
+    httpx_mock.add_response(
+        url="https://www.zohoapis.com/crm/v6/Contacts/search",
+        method="GET",
+        status_code=429,
+    )
+    httpx_mock.add_response(
+        url="https://www.zohoapis.com/crm/v6/Contacts/search",
+        method="GET",
+        json={"data": []},
+    )
+
+    client = ZohoClient(config, audit=audit, cache=cache)
+    result = client.get("Contacts/search")
+    assert result == {"data": []}
+
+
+def test_get_gives_up_after_3_attempts_on_429(
+    monkeypatch: pytest.MonkeyPatch,
+    config: ZohoConfig,
+    audit: AuditLogger,
+    cache: SessionCache,
+    httpx_mock,
+) -> None:
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _: None)
+
+    httpx_mock.add_response(
+        url="https://accounts.zoho.com/oauth/v2/token",
+        method="POST",
+        json={"access_token": "t", "expires_in": 3600},
+    )
+    for _ in range(3):
+        httpx_mock.add_response(
+            url="https://www.zohoapis.com/crm/v6/Contacts/search",
+            method="GET",
+            status_code=429,
+        )
+
+    client = ZohoClient(config, audit=audit, cache=cache)
+    with pytest.raises(httpx.HTTPStatusError):
+        client.get("Contacts/search")

@@ -6,9 +6,17 @@ from threading import Lock
 from typing import Any
 
 import httpx
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from src.zoho.audit import AuditLogger
 from src.zoho.cache import SessionCache
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code == 429
+    )
 
 
 @dataclass(frozen=True)
@@ -134,13 +142,7 @@ class ZohoClient:
         url = f"{self._config.api_domain}/crm/v6/{path.lstrip('/')}"
         t0 = time.monotonic()
         try:
-            resp = self._http.get(
-                url,
-                headers={"Authorization": f"Zoho-oauthtoken {self._access_token}"},
-                params=params,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+            data = self._http_get_with_retry(url, params)
         except Exception as e:
             self._audit.log_error(path, params, e)
             raise
@@ -152,3 +154,20 @@ class ZohoClient:
             self._cache.set(cache_key, data, ttl_seconds=cache_ttl_seconds)
 
         return data
+
+    @retry(
+        retry=retry_if_exception(_is_rate_limited),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    def _http_get_with_retry(
+        self, url: str, params: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        resp = self._http.get(
+            url,
+            headers={"Authorization": f"Zoho-oauthtoken {self._access_token}"},
+            params=params,
+        )
+        resp.raise_for_status()
+        return resp.json()
