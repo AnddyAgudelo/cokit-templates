@@ -1,0 +1,9 @@
+{
+  "python_version": "3.12",
+  "dependencies": ["."],
+  "package_manager": "uv",
+  "graphs": {
+    "segmentation_agent": "./main.py:graph"
+  },
+  "env": "../.env"
+}
