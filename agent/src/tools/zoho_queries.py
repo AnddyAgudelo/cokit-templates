@@ -36,6 +36,21 @@ def _normalize_iso_datetime(value: str, *, end_of_day: bool = False) -> str:
     return value + ("T23:59:59+00:00" if end_of_day else "T00:00:00+00:00")
 
 
+_PERIOD_PREFIX_LEN = {"day": 10, "month": 7, "year": 4}
+
+
+def _truncate_to_period(value: Any, period: str) -> str:
+    """Truncate an ISO timestamp string to a calendar bucket.
+
+    'day' → 'YYYY-MM-DD', 'month' → 'YYYY-MM', 'year' → 'YYYY'.
+    Non-string or short values pass through as str(value).
+    """
+    n = _PERIOD_PREFIX_LEN.get(period)
+    if n is None or not isinstance(value, str) or len(value) < n:
+        return str(value) if value is not None else "(unknown)"
+    return value[:n]
+
+
 def _build_criteria(filters: dict[str, str]) -> str:
     """Build a Zoho COQL-like criteria string: (k:equals:v)and(k2:equals:v2).
 
@@ -268,6 +283,7 @@ def make_zoho_tools(client: ZohoClient) -> list:
         layout: str | None = None,
         created_after: str | None = None,
         created_before: str | None = None,
+        group_by_period: str | None = None,
     ) -> dict[str, Any]:
         """
         Aggregate distribution of `field` over the (filtered) records in `module`.
@@ -279,6 +295,11 @@ def make_zoho_tools(client: ZohoClient) -> list:
         `layout` filters by Zoho Layout name (Diseño), e.g. layout="Empresas".
         `created_after` and `created_before` are ISO 8601 strings for Created_Time
         filtering, e.g. created_after="2026-01-01".
+        `group_by_period` truncates datetime field values into calendar buckets
+        before counting. Use 'day' for "por día", 'month' for "por mes", 'year'
+        for "por año". Without this, datetime fields produce one bucket per
+        unique timestamp (one record per bucket — useless). Always pass this
+        when grouping by Created_Time, Modified_Time, or any datetime field.
         """
         # Deterministic validation — prevents LLM field hallucinations
         valid_fields = _fetch_field_api_names(client, module)
@@ -360,13 +381,18 @@ def make_zoho_tools(client: ZohoClient) -> list:
         counts: dict[str, int] = {}
         for rec in all_records:
             value = rec.get(field)
-            label = str(value) if value is not None else "(unknown)"
+            if group_by_period:
+                label = _truncate_to_period(value, group_by_period)
+            else:
+                label = str(value) if value is not None else "(unknown)"
             counts[label] = counts.get(label, 0) + 1
 
-        buckets = [
-            {"label": label, "count": count}
-            for label, count in sorted(counts.items(), key=lambda kv: -kv[1])
-        ]
+        # Sort: chronological for time-period buckets, by-count desc otherwise
+        if group_by_period:
+            sorted_items = sorted(counts.items(), key=lambda kv: kv[0])
+        else:
+            sorted_items = sorted(counts.items(), key=lambda kv: -kv[1])
+        buckets = [{"label": label, "count": count} for label, count in sorted_items]
         return {
             "field": field,
             "buckets": buckets,

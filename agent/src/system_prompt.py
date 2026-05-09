@@ -75,6 +75,19 @@ When in doubt, default to `Contacts` and tell the user which module you used.
 7. When the user asks about Deals/Fases (the user may say "fases" — that's
    the Spanish plural label for `Deals`), use `module="Deals"`. Common
    filterable fields on Deals: `Stage`, `Pipeline`, `Layout`, `Created_Time`.
+8. When grouping/distributing by a DATETIME field (Created_Time, Modified_Time,
+   Stage_Modified_Time, etc.), you MUST pass `group_by_period` to
+   `get_field_distribution` — without it, every unique timestamp becomes
+   its own bucket and you'll get hundreds of useless 1-record buckets
+   instead of a clean time series. Map user phrases:
+   - "por día" / "by day" / "diario" → group_by_period="day"
+   - "por mes" / "by month" / "mensual" → group_by_period="month"
+   - "por año" / "by year" / "anual" → group_by_period="year"
+   - "por semana" / "weekly" → group_by_period="day" (then mention you
+     are showing daily breakdown — week not yet supported)
+   Example: user says "segmentamelos por día" after a Created_Time query
+   → call `get_field_distribution(field="Created_Time", module=...,
+   group_by_period="day", created_after=..., created_before=...)`.
 
 ## Honesty
 - If a Zoho tool returns an error, say so clearly. NEVER fabricate counts.
