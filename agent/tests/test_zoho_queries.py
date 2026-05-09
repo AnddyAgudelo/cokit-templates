@@ -168,3 +168,48 @@ def test_list_custom_fields_returns_empty_on_failure() -> None:
     client.get.side_effect = RuntimeError("boom")
     [_, _, list_custom_fields] = make_zoho_tools(client)
     assert list_custom_fields.invoke({}) == []
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: module parameter routes to correct Zoho module
+# ---------------------------------------------------------------------------
+
+def test_query_customers_uses_module_parameter() -> None:
+    client = _client_returning({"data": [], "info": {"count": 0}})
+    [query_customers, *_] = make_zoho_tools(client)
+
+    query_customers.invoke({
+        "filters": {"Industry": "Software"},
+        "limit": 10,
+        "module": "Accounts",
+    })
+
+    call_args = client.get.call_args
+    assert call_args.args[0] == "Accounts/search", f"expected Accounts/search, got {call_args.args[0]}"
+
+
+def test_get_field_distribution_uses_module_parameter() -> None:
+    client = _client_returning({"data": []})
+    [_, get_field_distribution, _] = make_zoho_tools(client)
+
+    get_field_distribution.invoke({
+        "field": "Industry",
+        "module": "Accounts",
+    })
+
+    call_args = client.get.call_args
+    assert call_args.args[0] == "Accounts", f"expected Accounts, got {call_args.args[0]}"
+
+
+def test_get_field_distribution_uses_module_with_filters() -> None:
+    client = _client_returning({"data": []})
+    [_, get_field_distribution, _] = make_zoho_tools(client)
+
+    get_field_distribution.invoke({
+        "field": "Industry",
+        "filters": {"Country": "Colombia"},
+        "module": "Accounts",
+    })
+
+    call_args = client.get.call_args
+    assert call_args.args[0] == "Accounts/search", f"expected Accounts/search, got {call_args.args[0]}"

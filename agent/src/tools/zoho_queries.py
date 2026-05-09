@@ -37,13 +37,16 @@ def make_zoho_tools(client: ZohoClient) -> list:
         filters: dict[str, str],
         limit: int = 50,
         fields: list[str] | None = None,
+        module: str = "Contacts",
     ) -> dict[str, Any]:
         """
-        Query Zoho contacts matching `filters`.
+        Query Zoho records matching `filters` in the specified `module`.
         `filters` example: {"Tier": "premium", "City": "Bogota"}.
         Returns aggregate count and a list of records.
         Default `fields` exclude PII (email, phone, address) — pass explicit
         `fields` ONLY when the user explicitly drills down on individual contacts.
+        `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
+        "Deals", "Leads". Use "Accounts" for companies/empresas.
         """
         if not filters:
             return {
@@ -58,7 +61,7 @@ def make_zoho_tools(client: ZohoClient) -> list:
 
         try:
             response = client.get(
-                "Contacts/search",
+                f"{module}/search",
                 params={
                     "criteria": criteria,
                     "fields": select,
@@ -81,18 +84,21 @@ def make_zoho_tools(client: ZohoClient) -> list:
     def get_field_distribution(
         field: str,
         filters: dict[str, str] | None = None,
+        module: str = "Contacts",
     ) -> dict[str, Any]:
         """
-        Aggregate distribution of `field` over the (filtered) Contacts set.
+        Aggregate distribution of `field` over the (filtered) records in `module`.
         Returns: {"field": str, "buckets": [{"label": str, "count": int}, ...], "total": int}.
         Prefer this over query_customers + manual aggregation.
+        `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
+        "Deals", "Leads". Use "Accounts" for companies/empresas.
         """
         params: dict[str, Any] = {"fields": f"id,{field}", "per_page": 200}
         if filters:
             params["criteria"] = _build_criteria(filters)
-            endpoint = "Contacts/search"
+            endpoint = f"{module}/search"
         else:
-            endpoint = "Contacts"
+            endpoint = module
 
         try:
             response = client.get(endpoint, params=params)
