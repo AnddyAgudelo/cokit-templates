@@ -7,6 +7,7 @@ dependencies = [
   "langchain==1.2.15",
   "langgraph==1.1.6",
   "langchain-openai==1.1.9",
+  "openai>=1.109.1,<2.0.0",
   "copilotkit==0.1.87",
   "langgraph-cli[inmem]==0.4.21",
   "langgraph-api==0.7.101",
