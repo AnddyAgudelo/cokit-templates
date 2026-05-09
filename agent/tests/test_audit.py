@@ -71,3 +71,25 @@ def test_log_handles_response_without_data_list(tmp_path: Path) -> None:
         (tmp_path / f"zoho-audit-{today}.jsonl").read_text().strip()
     )
     assert entry["record_count"] == 0
+
+
+def test_log_success_with_non_serializable_params(tmp_path: Path) -> None:
+    """Non-JSON values in params should be serialized via str() fallback, not crash."""
+    from datetime import date
+
+    logger = AuditLogger(audit_dir=tmp_path)
+    logger.log_success(
+        path="Contacts/search",
+        params={"modified_after": date(2026, 1, 1)},
+        response={"data": []},
+        latency_ms=5.0,
+    )
+
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    entry = json.loads(
+        (tmp_path / f"zoho-audit-{today}.jsonl").read_text().strip()
+    )
+    assert entry["status"] == "ok"
+    assert "modified_after" in entry["params"]
+    # date object should be stringified by default=str fallback
+    assert entry["params"]["modified_after"] == "2026-01-01"

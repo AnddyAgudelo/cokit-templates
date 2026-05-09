@@ -53,4 +53,4 @@ class AuditLogger:
 
     def _write(self, entry: dict[str, Any]) -> None:
         with self._path_for_today().open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(entry, default=str) + "\n")
