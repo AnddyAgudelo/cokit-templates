@@ -23,7 +23,7 @@ def _build_agent():
     )
 
     model = ChatOpenAI(
-        model=os.environ.get("OPENAI_MODEL", "gpt-5.2-mini"),
+        model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
         model_kwargs={"parallel_tool_calls": False},
     )
 
