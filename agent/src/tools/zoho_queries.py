@@ -24,6 +24,18 @@ def _escape_coql_value(value: str) -> str:
     return out
 
 
+def _normalize_iso_datetime(value: str, *, end_of_day: bool = False) -> str:
+    """Pad a date-only ISO string with a time + UTC offset.
+
+    Zoho's /search endpoint returns 400 for bare YYYY-MM-DD; it requires a
+    full ISO 8601 datetime with timezone (e.g. '2026-05-09T00:00:00+00:00').
+    If `value` already contains 'T', return it unchanged.
+    """
+    if "T" in value:
+        return value
+    return value + ("T23:59:59+00:00" if end_of_day else "T00:00:00+00:00")
+
+
 def _build_criteria(filters: dict[str, str]) -> str:
     """Build a Zoho COQL-like criteria string: (k:equals:v)and(k2:equals:v2).
 
@@ -204,9 +216,13 @@ def make_zoho_tools(client: ZohoClient) -> list:
         if filters:
             criteria_parts.append(_build_criteria(filters))
         if created_after:
-            criteria_parts.append(f"(Created_Time:greater_equal:{created_after})")
+            criteria_parts.append(
+                f"(Created_Time:greater_equal:{_normalize_iso_datetime(created_after)})"
+            )
         if created_before:
-            criteria_parts.append(f"(Created_Time:less_equal:{created_before})")
+            criteria_parts.append(
+                f"(Created_Time:less_equal:{_normalize_iso_datetime(created_before, end_of_day=True)})"
+            )
         if layout_id:
             criteria_parts.append(f"(Layout:equals:{layout_id})")
 
@@ -307,9 +323,13 @@ def make_zoho_tools(client: ZohoClient) -> list:
         if filters:
             criteria_parts.append(_build_criteria(filters))
         if created_after:
-            criteria_parts.append(f"(Created_Time:greater_equal:{created_after})")
+            criteria_parts.append(
+                f"(Created_Time:greater_equal:{_normalize_iso_datetime(created_after)})"
+            )
         if created_before:
-            criteria_parts.append(f"(Created_Time:less_equal:{created_before})")
+            criteria_parts.append(
+                f"(Created_Time:less_equal:{_normalize_iso_datetime(created_before, end_of_day=True)})"
+            )
         if layout_id:
             criteria_parts.append(f"(Layout:equals:{layout_id})")
 

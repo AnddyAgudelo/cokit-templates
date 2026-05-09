@@ -416,7 +416,11 @@ def test_query_customers_returns_error_for_unknown_layout() -> None:
 # ---------------------------------------------------------------------------
 
 def test_query_customers_created_after_clause_in_criteria() -> None:
-    """created_after produces a Created_Time:greater_equal clause in criteria."""
+    """created_after produces a Created_Time:greater_equal clause in criteria.
+
+    Date-only inputs (YYYY-MM-DD) are auto-padded to a full ISO datetime
+    because Zoho /search rejects bare dates with HTTP 400.
+    """
     client = _client_returning({"data": [], "info": {"more_records": False}})
     [query_customers, *_] = make_zoho_tools(client)
 
@@ -427,7 +431,36 @@ def test_query_customers_created_after_clause_in_criteria() -> None:
 
     call_args = client.get.call_args
     criteria = call_args.kwargs["params"]["criteria"]
-    assert "(Created_Time:greater_equal:2026-01-01)" in criteria
+    # Date-only input is normalized to full ISO datetime with UTC offset
+    assert "(Created_Time:greater_equal:2026-01-01T00:00:00+00:00)" in criteria
+
+
+def test_created_after_iso_datetime_passes_through_unchanged() -> None:
+    """If created_after already includes a 'T' time, it is not re-padded."""
+    client = _client_returning({"data": [], "info": {"more_records": False}})
+    [query_customers, *_] = make_zoho_tools(client)
+
+    query_customers.invoke({
+        "created_after": "2026-01-01T15:30:00+00:00",
+        "module": "Deals",
+    })
+
+    criteria = client.get.call_args.kwargs["params"]["criteria"]
+    assert "(Created_Time:greater_equal:2026-01-01T15:30:00+00:00)" in criteria
+
+
+def test_created_before_date_only_normalized_to_end_of_day() -> None:
+    """A date-only created_before maps to T23:59:59+00:00 (end of day in UTC)."""
+    client = _client_returning({"data": [], "info": {"more_records": False}})
+    [query_customers, *_] = make_zoho_tools(client)
+
+    query_customers.invoke({
+        "created_before": "2026-05-09",
+        "module": "Deals",
+    })
+
+    criteria = client.get.call_args.kwargs["params"]["criteria"]
+    assert "(Created_Time:less_equal:2026-05-09T23:59:59+00:00)" in criteria
 
 
 def test_query_customers_created_before_clause_in_criteria() -> None:
