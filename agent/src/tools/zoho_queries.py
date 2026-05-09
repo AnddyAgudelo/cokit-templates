@@ -237,12 +237,24 @@ def make_zoho_tools(client: ZohoClient) -> list:
             endpoint = module
             params = {"fields": select}
 
+        # Cap limit to 200 (Zoho's max per_page) and only paginate enough
+        # pages to satisfy `limit`. For a "how many" question (default
+        # limit=50), one page (200 records) is plenty — paginating further
+        # bloats the LLM context with unused records and trips overflow.
+        capped_limit = min(limit, 200)
+        needed_pages = max(1, (capped_limit + 199) // 200)
+
         try:
-            all_records, truncated = _paginated_get(client, endpoint, params)
+            all_records, truncated = _paginated_get(
+                client, endpoint, params, max_pages=needed_pages
+            )
         except Exception as e:
             return {"count": 0, "records": [], "error": str(e)}
 
-        capped_limit = min(limit, 200)
+        # Try to recover the true total from Zoho's first-page info.count by
+        # making one cheap HEAD-style call: peek at page 1 with per_page=1.
+        # (Skipped for now — info.count would require restructuring _paginated_get.
+        # Use len(all_records) as a lower bound and let truncated flag signal more.)
         result_records = all_records[:capped_limit]
         return {
             "count": len(all_records),
