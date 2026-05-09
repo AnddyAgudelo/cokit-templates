@@ -1,9 +1,15 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from src.tools.zoho_queries import make_zoho_tools
 
 
 def _client_returning(payload: dict) -> MagicMock:
+    """Mock client that returns the given payload for every .get() call.
+    Ensures info.more_records=False so pagination terminates on first page."""
+    if "info" not in payload:
+        payload = {**payload, "info": {**payload.get("info", {}), "more_records": False}}
+    elif "more_records" not in payload["info"]:
+        payload["info"] = {**payload["info"], "more_records": False}
     client = MagicMock()
     client.get.return_value = payload
     return client
@@ -256,8 +262,11 @@ def test_get_field_distribution_returns_render_hint_on_success() -> None:
     def fake_get(path, params=None, **kwargs):
         if path == "settings/fields":
             return {"fields": [{"api_name": "City"}, {"api_name": "Industry"}]}
-        # Distribution call
-        return {"data": [{"City": "Bogota"}, {"City": "Medellin"}, {"City": "Bogota"}]}
+        # Distribution call — pagination: first page has data, no more_records
+        return {
+            "data": [{"City": "Bogota"}, {"City": "Medellin"}, {"City": "Bogota"}],
+            "info": {"more_records": False},
+        }
 
     client.get.side_effect = fake_get
     [_, get_field_distribution, _] = make_zoho_tools(client)
@@ -290,3 +299,171 @@ def test_query_customers_validates_filter_keys() -> None:
     assert "error" in result
     assert "NonExistent" in result["error"]
     assert "suggestions" in result
+
+
+# ---------------------------------------------------------------------------
+# New tests: pagination
+# ---------------------------------------------------------------------------
+
+def test_paginated_get_accumulates_multiple_pages() -> None:
+    """_paginated_get fetches pages until more_records=False."""
+    from src.tools.zoho_queries import _paginated_get
+
+    page_responses = [
+        {"data": [{"id": "1"}, {"id": "2"}], "info": {"more_records": True}},
+        {"data": [{"id": "3"}, {"id": "4"}], "info": {"more_records": True}},
+        {"data": [{"id": "5"}], "info": {"more_records": False}},
+    ]
+    client = MagicMock()
+    client.get.side_effect = page_responses
+
+    records, truncated = _paginated_get(client, "Contacts", {"fields": "id"})
+
+    assert len(records) == 5
+    assert [r["id"] for r in records] == ["1", "2", "3", "4", "5"]
+    assert truncated is False
+    assert client.get.call_count == 3
+
+
+def test_paginated_get_truncates_at_max_pages() -> None:
+    """_paginated_get returns truncated=True when max_pages is hit."""
+    from src.tools.zoho_queries import _paginated_get
+
+    # Always returns more_records=True — simulates an enormous dataset
+    client = MagicMock()
+    client.get.return_value = {
+        "data": [{"id": "x"}],
+        "info": {"more_records": True},
+    }
+
+    records, truncated = _paginated_get(client, "Contacts", {"fields": "id"}, max_pages=3)
+
+    assert truncated is True
+    assert len(records) == 3  # 1 record per page × 3 pages
+    assert client.get.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# New tests: layout filter
+# ---------------------------------------------------------------------------
+
+def test_query_customers_resolves_layout_name_to_id() -> None:
+    """layout='Empresas' is resolved to its id and appended to criteria."""
+    client = MagicMock()
+
+    def fake_get(path, params=None, **kwargs):
+        if path == "settings/layouts":
+            return {
+                "layouts": [
+                    {"id": "4823391000299562269", "name": "Empresas"},
+                    {"id": "4823391000000091023", "name": "Standard"},
+                ]
+            }
+        # Data fetch — pagination terminates immediately
+        return {"data": [], "info": {"more_records": False}}
+
+    client.get.side_effect = fake_get
+    [query_customers, *_] = make_zoho_tools(client)
+
+    result = query_customers.invoke({
+        "layout": "Empresas",
+        "module": "Deals",
+    })
+
+    # Find the data fetch call and verify criteria contains layout id
+    data_calls = [
+        c for c in client.get.call_args_list
+        if c.args[0] == "Deals/search"
+    ]
+    assert len(data_calls) == 1
+    criteria = data_calls[0].kwargs["params"]["criteria"]
+    assert "4823391000299562269" in criteria
+    assert "Layout:equals" in criteria
+
+
+def test_query_customers_returns_error_for_unknown_layout() -> None:
+    """An unrecognised layout name returns an error with available names."""
+    client = MagicMock()
+
+    def fake_get(path, params=None, **kwargs):
+        if path == "settings/layouts":
+            return {
+                "layouts": [
+                    {"id": "111", "name": "Empresas"},
+                    {"id": "222", "name": "Standard"},
+                    {"id": "333", "name": "Técnicos"},
+                ]
+            }
+        return {"data": [], "info": {"more_records": False}}
+
+    client.get.side_effect = fake_get
+    [query_customers, *_] = make_zoho_tools(client)
+
+    result = query_customers.invoke({
+        "layout": "Desconocido",
+        "module": "Deals",
+    })
+
+    assert result["count"] == 0
+    assert "error" in result
+    assert "Desconocido" in result["error"]
+    assert "suggestions" in result
+    assert set(result["suggestions"]) == {"Empresas", "Standard", "Técnicos"}
+
+
+# ---------------------------------------------------------------------------
+# New tests: Created_Time date range filter
+# ---------------------------------------------------------------------------
+
+def test_query_customers_created_after_clause_in_criteria() -> None:
+    """created_after produces a Created_Time:greater_equal clause in criteria."""
+    client = _client_returning({"data": [], "info": {"more_records": False}})
+    [query_customers, *_] = make_zoho_tools(client)
+
+    query_customers.invoke({
+        "created_after": "2026-01-01",
+        "module": "Deals",
+    })
+
+    call_args = client.get.call_args
+    criteria = call_args.kwargs["params"]["criteria"]
+    assert "(Created_Time:greater_equal:2026-01-01)" in criteria
+
+
+def test_query_customers_created_before_clause_in_criteria() -> None:
+    """created_before produces a Created_Time:less_equal clause in criteria."""
+    client = _client_returning({"data": [], "info": {"more_records": False}})
+    [query_customers, *_] = make_zoho_tools(client)
+
+    query_customers.invoke({
+        "created_before": "2026-05-01T00:00:00+00:00",
+        "module": "Deals",
+    })
+
+    call_args = client.get.call_args
+    criteria = call_args.kwargs["params"]["criteria"]
+    assert "(Created_Time:less_equal:2026-05-01T00:00:00+00:00)" in criteria
+
+
+def test_query_customers_no_filters_but_layout_is_valid() -> None:
+    """query_customers succeeds with only layout= and no filters dict."""
+    client = MagicMock()
+
+    def fake_get(path, params=None, **kwargs):
+        if path == "settings/layouts":
+            return {
+                "layouts": [{"id": "4823391000299562269", "name": "Empresas"}]
+            }
+        return {"data": [{"id": "42", "Last_Name": "Test"}], "info": {"more_records": False}}
+
+    client.get.side_effect = fake_get
+    [query_customers, *_] = make_zoho_tools(client)
+
+    result = query_customers.invoke({
+        "layout": "Empresas",
+        "module": "Deals",
+    })
+
+    assert "error" not in result
+    assert result["count"] == 1
+    assert result["records"][0]["id"] == "42"

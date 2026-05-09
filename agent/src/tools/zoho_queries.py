@@ -10,23 +10,38 @@ from src.zoho.client import ZohoClient
 DEFAULT_QUERY_FIELDS = ["id", "Last_Name", "First_Name", "Account_Name"]
 
 
-_COQL_RESERVED = (":", "(", ")")
+# Chars that need backslash-escaping inside a COQL `equals` value.
+# Zoho docs: https://www.zoho.com/crm/developer/docs/api/v6/COQL-Overview.html
+# Backslash itself escaped first to avoid double-escaping.
+_COQL_VALUE_ESCAPES = ("\\", "(", ")", ",")
+
+
+def _escape_coql_value(value: str) -> str:
+    """Backslash-escape COQL special chars in a filter value."""
+    out = value
+    for ch in _COQL_VALUE_ESCAPES:
+        out = out.replace(ch, "\\" + ch)
+    return out
 
 
 def _build_criteria(filters: dict[str, str]) -> str:
     """Build a Zoho COQL-like criteria string: (k:equals:v)and(k2:equals:v2).
 
-    Raises ValueError if any value contains COQL-reserved chars; Zoho's
-    documented escape rules for `equals` are unreliable, so we refuse rather
-    than silently producing a malformed query.
+    Values are escaped so picklist labels with parens or commas (e.g.
+    'Standard (Standard)') survive transport to Zoho. The colon (`:`) is
+    the operator delimiter and has no documented escape — values containing
+    it are still rejected explicitly.
     """
     for k, v in filters.items():
-        if any(ch in v for ch in _COQL_RESERVED):
+        if ":" in v:
             raise ValueError(
-                f"filter value for {k!r} contains COQL-reserved char "
-                f"(one of {_COQL_RESERVED}): {v!r}"
+                f"filter value for {k!r} contains a colon "
+                f"(COQL operator delimiter, no escape supported): {v!r}"
             )
-    return "and".join(f"({k}:equals:{v})" for k, v in filters.items())
+    return "and".join(
+        f"({k}:equals:{_escape_coql_value(v)})"
+        for k, v in filters.items()
+    )
 
 
 def _fetch_field_api_names(client: ZohoClient, module: str) -> set[str]:
@@ -57,15 +72,66 @@ def _suggest_similar(field: str, valid: set[str], n: int = 5) -> list[str]:
     return sorted(valid)[:n]
 
 
+def _paginated_get(
+    client: ZohoClient,
+    endpoint: str,
+    params: dict[str, Any],
+    max_pages: int = 25,
+) -> tuple[list[dict], bool]:
+    """Fetch all pages from a Zoho list/search endpoint. Returns (records, truncated).
+
+    Loops until info.more_records is false OR max_pages reached. Concatenates
+    `data` arrays. Each page is one client.get call (rate-limited + audited).
+    """
+    all_records: list[dict] = []
+    for page in range(1, max_pages + 1):
+        page_params = dict(params)
+        page_params["page"] = page
+        page_params["per_page"] = 200
+        response = client.get(endpoint, params=page_params)
+        records = response.get("data", []) or []
+        all_records.extend(records)
+        info = response.get("info", {}) or {}
+        if not info.get("more_records"):
+            return all_records, False
+    # Hit the cap with more pages remaining
+    return all_records, True
+
+
+def _resolve_layout_id(
+    client: ZohoClient, module: str, layout_name: str
+) -> tuple[str | None, list[str]]:
+    """Resolve a layout name to its id for a module. Returns (layout_id_or_None, available_names)."""
+    try:
+        response = client.get(
+            "settings/layouts",
+            params={"module": module},
+            cache_key=f"layouts:{module}",
+            cache_ttl_seconds=3600,
+        )
+    except Exception:
+        return None, []
+    layouts = response.get("layouts", []) or []
+    available = [L.get("name") for L in layouts if L.get("name")]
+    target = layout_name.lower()
+    for L in layouts:
+        if (L.get("name") or "").lower() == target:
+            return L.get("id"), available
+    return None, available
+
+
 def make_zoho_tools(client: ZohoClient) -> list:
     """Bind tools to a ZohoClient instance via closure."""
 
     @tool
     def query_customers(
-        filters: dict[str, str],
+        filters: dict[str, str] | None = None,
         limit: int = 50,
         fields: list[str] | None = None,
         module: str = "Contacts",
+        layout: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
     ) -> dict[str, Any]:
         """
         Query Zoho records matching `filters` in the specified `module`.
@@ -77,53 +143,86 @@ def make_zoho_tools(client: ZohoClient) -> list:
         `fields` ONLY when the user explicitly drills down on individual contacts.
         `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
         "Deals", "Leads". Use "Accounts" for companies/empresas.
+        `layout` filters by Zoho Layout name (Diseño), e.g. layout="Empresas".
+        `created_after` and `created_before` are ISO 8601 strings for Created_Time
+        filtering, e.g. created_after="2026-01-01".
         """
-        if not filters:
+        # Require at least one filter dimension
+        if not filters and not layout and not created_after and not created_before:
             return {
                 "count": 0,
                 "records": [],
-                "error": "filters is required (e.g., {'Tier': 'premium'})",
+                "error": (
+                    "At least one of filters, layout, created_after, or "
+                    "created_before is required."
+                ),
             }
 
         # Validate filter keys exist in module schema
-        valid_fields = _fetch_field_api_names(client, module)
-        if valid_fields:
-            invalid_keys = [k for k in filters if k not in valid_fields]
-            if invalid_keys:
-                suggestions = {k: _suggest_similar(k, valid_fields) for k in invalid_keys}
+        if filters:
+            valid_fields = _fetch_field_api_names(client, module)
+            if valid_fields:
+                invalid_keys = [k for k in filters if k not in valid_fields]
+                if invalid_keys:
+                    suggestions = {k: _suggest_similar(k, valid_fields) for k in invalid_keys}
+                    return {
+                        "count": 0,
+                        "records": [],
+                        "error": (
+                            f"Filter keys not in module {module!r}: {invalid_keys}. "
+                            f"Suggestions: {suggestions}"
+                        ),
+                        "suggestions": suggestions,
+                    }
+
+        # Resolve layout name to id if provided
+        layout_id: str | None = None
+        if layout:
+            layout_id, available_layouts = _resolve_layout_id(client, module, layout)
+            if layout_id is None:
                 return {
                     "count": 0,
                     "records": [],
                     "error": (
-                        f"Filter keys not in module {module!r}: {invalid_keys}. "
-                        f"Suggestions: {suggestions}"
+                        f"Layout {layout!r} not found in module {module!r}. "
+                        f"Available layouts: {available_layouts}"
                     ),
-                    "suggestions": suggestions,
+                    "suggestions": available_layouts,
                 }
 
-        capped_limit = min(limit, 200)
-        criteria = _build_criteria(filters)
+        # Build criteria parts
+        criteria_parts: list[str] = []
+        if filters:
+            criteria_parts.append(_build_criteria(filters))
+        if created_after:
+            criteria_parts.append(f"(Created_Time:greater_equal:{created_after})")
+        if created_before:
+            criteria_parts.append(f"(Created_Time:less_equal:{created_before})")
+        if layout_id:
+            criteria_parts.append(f"(Layout:equals:{layout_id})")
+
+        final_criteria = "and".join(criteria_parts) if criteria_parts else None
         select = ",".join(fields or DEFAULT_QUERY_FIELDS)
 
+        # Choose endpoint: use /search when we have criteria, bare module otherwise
+        if final_criteria:
+            endpoint = f"{module}/search"
+            params: dict[str, Any] = {"criteria": final_criteria, "fields": select}
+        else:
+            endpoint = module
+            params = {"fields": select}
+
         try:
-            response = client.get(
-                f"{module}/search",
-                params={
-                    "criteria": criteria,
-                    "fields": select,
-                    "per_page": capped_limit,
-                },
-            )
+            all_records, truncated = _paginated_get(client, endpoint, params)
         except Exception as e:
             return {"count": 0, "records": [], "error": str(e)}
 
-        records = response.get("data", []) or []
-        info = response.get("info", {}) or {}
-        total = info.get("count", len(records))
+        capped_limit = min(limit, 200)
+        result_records = all_records[:capped_limit]
         return {
-            "count": total,
-            "records": records[:capped_limit],
-            "truncated": len(records) >= capped_limit and total > capped_limit,
+            "count": len(all_records),
+            "records": result_records,
+            "truncated": truncated or len(all_records) > capped_limit,
         }
 
     @tool
@@ -131,6 +230,9 @@ def make_zoho_tools(client: ZohoClient) -> list:
         field: str,
         filters: dict[str, str] | None = None,
         module: str = "Contacts",
+        layout: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
     ) -> dict[str, Any]:
         """
         Aggregate distribution of `field` over the (filtered) records in `module`.
@@ -139,6 +241,9 @@ def make_zoho_tools(client: ZohoClient) -> list:
         with suggested field names. Prefer this over query_customers + manual aggregation.
         `module` defaults to "Contacts". Common values: "Contacts", "Accounts",
         "Deals", "Leads". Use "Accounts" for companies/empresas.
+        `layout` filters by Zoho Layout name (Diseño), e.g. layout="Empresas".
+        `created_after` and `created_before` are ISO 8601 strings for Created_Time
+        filtering, e.g. created_after="2026-01-01".
         """
         # Deterministic validation — prevents LLM field hallucinations
         valid_fields = _fetch_field_api_names(client, module)
@@ -156,7 +261,6 @@ def make_zoho_tools(client: ZohoClient) -> list:
                 "suggestions": suggestions,
             }
 
-        params: dict[str, Any] = {"fields": f"id,{field}", "per_page": 200}
         if filters:
             # Also validate filter keys
             invalid_keys = [k for k in filters if k not in valid_fields and valid_fields]
@@ -172,19 +276,50 @@ def make_zoho_tools(client: ZohoClient) -> list:
                     ),
                     "suggestions": suggestions,
                 }
-            params["criteria"] = _build_criteria(filters)
+
+        # Resolve layout name to id if provided
+        layout_id: str | None = None
+        if layout:
+            layout_id, available_layouts = _resolve_layout_id(client, module, layout)
+            if layout_id is None:
+                return {
+                    "field": field,
+                    "buckets": [],
+                    "total": 0,
+                    "error": (
+                        f"Layout {layout!r} not found in module {module!r}. "
+                        f"Available layouts: {available_layouts}"
+                    ),
+                    "suggestions": available_layouts,
+                }
+
+        # Build criteria parts
+        criteria_parts: list[str] = []
+        if filters:
+            criteria_parts.append(_build_criteria(filters))
+        if created_after:
+            criteria_parts.append(f"(Created_Time:greater_equal:{created_after})")
+        if created_before:
+            criteria_parts.append(f"(Created_Time:less_equal:{created_before})")
+        if layout_id:
+            criteria_parts.append(f"(Layout:equals:{layout_id})")
+
+        final_criteria = "and".join(criteria_parts) if criteria_parts else None
+
+        base_params: dict[str, Any] = {"fields": f"id,{field}"}
+        if final_criteria:
+            base_params["criteria"] = final_criteria
             endpoint = f"{module}/search"
         else:
             endpoint = module
 
         try:
-            response = client.get(endpoint, params=params)
+            all_records, truncated = _paginated_get(client, endpoint, base_params)
         except Exception as e:
             return {"field": field, "buckets": [], "total": 0, "error": str(e)}
 
-        records = response.get("data", []) or []
         counts: dict[str, int] = {}
-        for rec in records:
+        for rec in all_records:
             value = rec.get(field)
             label = str(value) if value is not None else "(unknown)"
             counts[label] = counts.get(label, 0) + 1
@@ -196,8 +331,8 @@ def make_zoho_tools(client: ZohoClient) -> list:
         return {
             "field": field,
             "buckets": buckets,
-            "total": len(records),
-            "truncated": len(records) >= 200,
+            "total": len(all_records),
+            "truncated": truncated,
             "render_hint": {
                 "type": "bar" if len(buckets) > 1 else "metric",
                 "title": f"{field} distribution in {module}",
